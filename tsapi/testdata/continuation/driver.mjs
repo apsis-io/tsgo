@@ -6,7 +6,10 @@
 // thing between runs is the store.
 //
 // Usage: bun driver.mjs <spec.json>
-//   spec = { path, export?, store, runs: [{ module }] }
+//   spec = { path, export?, store, applyOp?, applyField?, runs: [{ module }] }
+//   applyOp/applyField: an extra write op the driver applies at the dotted
+//   field applyField of the run's object (e.g. op 'carry' at 'status.carry'),
+//   mirroring a host-side spelling the generic get/ensure pair does not cover.
 // Emits one JSON document: { runs: [{ outcome, effects }], store }.
 
 import { readFileSync } from 'node:fs'
@@ -55,6 +58,20 @@ for (const r of spec.runs) {
         node = node[p]
       }
       node[last] = eff.args.value
+      answer = undefined
+    } else if (spec.applyOp !== undefined && eff.op === spec.applyOp) {
+      const parts = String(spec.applyField).split('.')
+      const last = parts.pop()
+      let node = store[r.path]
+      if (node === undefined) {
+        node = {}
+        store[r.path] = node
+      }
+      for (const p of parts) {
+        if (typeof node[p] !== 'object' || node[p] === null) node[p] = {}
+        node = node[p]
+      }
+      node[last] = eff.args
       answer = undefined
     } else {
       answer = undefined

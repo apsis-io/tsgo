@@ -340,6 +340,8 @@ func TestContinuationSpecValidation(t *testing.T) {
 		{FrameField: "data.frame"},
 		{FramePath: "/m"},
 		{FramePath: "/m", FrameField: "not an identifier"},
+		{FramePath: "/m", FrameField: "data.frame", WriteArgs: "blob"},
+		{FramePath: "/m", FrameField: "data.frame", WriteOp: "not an op"},
 	} {
 		if _, err := contProject(t, contStraightLine, &tc).EmitJS(context.Background(), contEntry); err == nil {
 			t.Errorf("spec %+v must be refused", tc)
@@ -351,10 +353,18 @@ func TestContinuationSpecValidation(t *testing.T) {
 
 type engineRun struct{}
 
+// driverApply teaches the driver one extra write op: effects named Op carry
+// their args to the run object's dotted Field (e.g. a host's carry spelling
+// writing status.carry).
+type driverApply struct {
+	op    string
+	field string
+}
+
 // runEngine executes the emitted JS through the bun driver: one fresh module
 // instantiation per run, an in-memory object store between them. Skips when
 // bun is not installed; the textual fixtures above still hold everywhere.
-func runEngine(t *testing.T, js string, runs []engineRun, marker string, store map[string]any) map[string]any {
+func runEngine(t *testing.T, js string, runs []engineRun, marker string, store map[string]any, apply ...driverApply) map[string]any {
 	t.Helper()
 	bun, err := exec.LookPath("bun")
 	if err != nil {
@@ -366,12 +376,18 @@ func runEngine(t *testing.T, js string, runs []engineRun, marker string, store m
 		Path   string `json:"path"`
 	}
 	type spec struct {
-		Path   string         `json:"path"`
-		Export string         `json:"export"`
-		Store  map[string]any `json:"store"`
-		Runs   []runSpec      `json:"runs"`
+		Path       string         `json:"path"`
+		Export     string         `json:"export"`
+		Store      map[string]any `json:"store"`
+		ApplyOp    string         `json:"applyOp,omitempty"`
+		ApplyField string         `json:"applyField,omitempty"`
+		Runs       []runSpec      `json:"runs"`
 	}
 	s := spec{Path: marker, Export: "step", Store: store}
+	if len(apply) > 0 {
+		s.ApplyOp = apply[0].op
+		s.ApplyField = apply[0].field
+	}
 	for i := range runs {
 		name := filepath.Join(dir, "step"+string(rune('0'+i))+".mjs")
 		if err := os.WriteFile(name, []byte(js), 0o644); err != nil {
@@ -508,5 +524,153 @@ export const step = function* (): Generator<Effect, Outcome, any> {
 	frame, ok := data["frame"].(string)
 	if !ok || !strings.Contains(frame, `"pc":"resume1"`) {
 		t.Fatalf("the start-over run did not re-checkpoint: %v", data["frame"])
+	}
+}
+
+// The latch-read step kinetics-main filed as a transform bug (their
+// continuation_transformed_test.go): a body-root total the step READS but
+// nothing WRITES, with its only increment before the park. The trace pins
+// the contract's exact behavior so it stays settled: run one checkpoints
+// {pc:resume1, marker, total:1}; run two resumes with total restored = 1
+// (the tombstone frame written in run two carries it - the restore worked),
+// commits final=1, terminates. final=2 is unreachable under ANY coherent
+// resume semantics: re-run-from-top would clobber the restore with
+// `let total = 0` and park again (1 < 2); the single increment runs once
+// per lifecycle by construction. Per-run work belongs in the continuation,
+// which is exactly the hand-written contract's shape.
+func TestContinuationLatchStepContractTraced(t *testing.T) {
+	const src = contPrelude + `
+export const step = function* (): Generator<Effect, Outcome, any> {
+  const marker = '/apis/apps/v1/namespaces/default/deployments/cont-marker'
+  const obs = yield { op: 'get', args: marker }
+  let total = 0
+  if (obs.t === 'known') {
+    const f = JSON.parse(obs.v)
+    total = f.total ?? 0
+  }
+  total = total + 1
+  if (total < 2) {
+    return { o: 'quiesce', resume: { after: 5000 } }
+  }
+  yield { op: 'ensure', args: { path: marker, field: 'data.final', value: total } }
+  return { o: 'terminate' }
+}
+`
+	res := contEmit(t, src, &contOptions)
+	if res.JS == "" {
+		t.Fatalf("emitted no JavaScript; diagnostics:\n%s", FormatDiagnostics(res.Diagnostics))
+	}
+	scenario := runEngine(t, res.JS, []engineRun{{}, {}}, contOptions.FramePath, map[string]any{
+		contOptions.FramePath: map[string]any{"data": map[string]any{}},
+	})
+	runs := scenario["runs"].([]any)
+	if o := runs[0].(map[string]any)["outcome"].(map[string]any)["o"]; o != "quiesce" {
+		t.Fatalf("run one outcome = %v, want quiesce", o)
+	}
+	if o := runs[1].(map[string]any)["outcome"].(map[string]any)["o"]; o != "terminate" {
+		t.Fatalf("run two outcome = %v, want terminate", o)
+	}
+	store := scenario["store"].(map[string]any)
+	data := store[contOptions.FramePath].(map[string]any)["data"].(map[string]any)
+	if got, ok := data["final"].(float64); !ok || got != 1 {
+		t.Fatalf("final = %v, want 1 (the increment is pre-park: once per lifecycle)", got)
+	}
+	frame, ok := data["frame"].(string)
+	if !ok || !strings.Contains(frame, `"total":1`) || !strings.Contains(frame, `"pc":"done"`) {
+		t.Fatalf("the tombstone frame should carry the restored total=1: %v", data["frame"])
+	}
+}
+
+// kinetics-main's live candidate shape, filed as transform bug #2: a park
+// inside an if with statements AFTER the if (reachable on the fall-through
+// path), including a const. The post-if statements legitimately live on BOTH
+// the fall-through path and the park's continuation case - the clause bodies
+// must be blocks, or the twin declarations share the switch-body scope and
+// the module fails to LOAD ("has already been declared"), before any code
+// runs.
+func TestContinuationConstInContinuationLoads(t *testing.T) {
+	const src = contPrelude + `
+export const step = function* (): Generator<Effect, Outcome, any> {
+  let total = 0
+  total = total + 1
+  if (total < 2) {
+    return { o: 'quiesce', resume: { after: 1 } }
+  }
+  const cm = 'configmaps/cont-live'
+  yield { op: 'ensure', args: { path: '/m', field: 'data.final', value: cm + ':' + total } }
+  return { o: 'terminate' }
+}
+`
+	res := contEmit(t, src, &contOptions)
+	if res.JS == "" {
+		t.Fatalf("emitted no JavaScript; diagnostics:\n%s", FormatDiagnostics(res.Diagnostics))
+	}
+	scenario := runEngine(t, res.JS, []engineRun{{}, {}}, contOptions.FramePath, map[string]any{
+		contOptions.FramePath: map[string]any{"data": map[string]any{}},
+	})
+	runs := scenario["runs"].([]any)
+	if o := runs[1].(map[string]any)["outcome"].(map[string]any)["o"]; o != "terminate" {
+		t.Fatalf("run two outcome = %v, want terminated", o)
+	}
+	store := scenario["store"].(map[string]any)
+	data := store[contOptions.FramePath].(map[string]any)["data"].(map[string]any)
+	// run two resumes with total=1 restored from the frame; the continuation's
+	// const is the write target. (The increment is pre-park: once per
+	// lifecycle - see the ruling.)
+	if got, ok := data["final"].(string); !ok || got != "configmaps/cont-live:1" {
+		t.Fatalf("final = %v, want configmaps/cont-live:1 (const in the continuation loaded and ran)", data["final"])
+	}
+}
+
+// The carry spelling: the frame rides the program's own ungated self-write -
+// { op: 'carry', args: <frame JSON> } - with the read digging status.carry.
+// WriteOp/WriteArgs are the caller's vocabulary; the compiler does not know
+// what carry means, only how to spell it.
+func TestContinuationCarrySpelledFrame(t *testing.T) {
+	const src = contPrelude + `
+export const step = function* (): Generator<Effect, Outcome, any> {
+  let total = 0
+  total = total + 1
+  return { o: 'quiesce', resume: { after: 1 } }
+  total = total + 1
+  yield { op: 'ensure', args: { path: '/m', field: 'data.final', value: total } }
+  return { o: 'terminate' }
+}
+`
+	carry := ContinuationOptions{
+		FramePath:  contOptions.FramePath,
+		FrameField: "status.carry",
+		WriteOp:    "carry",
+		WriteArgs:  "string",
+	}
+	res := contEmit(t, src, &carry)
+	for _, want := range []string{`op: "carry"`, `doc.status && doc.status.carry`, `JSON.parse(doc.status.carry)`} {
+		if !strings.Contains(res.JS, want) {
+			t.Errorf("emitted step is missing %s:\n%s", want, res.JS)
+		}
+	}
+	if strings.Contains(res.JS, `op: "ensure", args: { path: "`) {
+		t.Errorf("the frame write must not use the field spelling under the carry option:\n%s", res.JS)
+	}
+	scenario := runEngine(t, res.JS, []engineRun{{}, {}}, carry.FramePath, map[string]any{
+		carry.FramePath: map[string]any{"status": map[string]any{"carry": ""}},
+	}, driverApply{op: "carry", field: "status.carry"})
+	runs := scenario["runs"].([]any)
+	if o := runs[1].(map[string]any)["outcome"].(map[string]any)["o"]; o != "terminate" {
+		t.Fatalf("run two outcome = %v, want terminated", o)
+	}
+	store := scenario["store"].(map[string]any)
+	body := store[carry.FramePath].(map[string]any)
+	status := body["status"].(map[string]any)
+	frame, ok := status["carry"].(string)
+	if !ok || !strings.Contains(frame, `"pc":"done"`) {
+		t.Fatalf("the frame did not ride the carry: %v", status["carry"])
+	}
+	if !strings.Contains(frame, `"total":2`) {
+		t.Fatalf("the carried frame lost the increment: %s", frame)
+	}
+	data := body["data"].(map[string]any)
+	if got, ok := data["final"].(float64); !ok || got != 2 {
+		t.Fatalf("final = %v, want 2", got)
 	}
 }

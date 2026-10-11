@@ -28,14 +28,23 @@ import (
 
 // Spec carries the caller-supplied frame placement: which durable object
 // holds the frame (FramePath) and at which dotted field inside the object
-// body it lives (FrameField, e.g. "data.frame"). Which durable tier backs
-// the object is the caller's business, not the compiler's.
+// body it lives (FrameField, e.g. "data.frame"), plus the WRITE spelling -
+// which effect op checkpoints use and with which args shape. Which durable
+// tier backs the object is the caller's business, not the compiler's; the
+// compiler does not know what any op MEANS to any consumer.
 type Spec struct {
 	FramePath  string
 	FrameField string
+	// WriteOp names the effect op for frame writes. Empty means "ensure".
+	WriteOp string
+	// WriteArgs selects the write's args shape: "field" (default) is
+	// {path, field, value} with value the frame's JSON; "string" makes args
+	// the frame's JSON directly (e.g. a carry-shaped self-write).
+	WriteArgs string
 }
 
-// Validate reports whether the spec names a place a frame can live.
+// Validate reports whether the spec names a place a frame can live and a
+// write spelling the emitted code can take.
 func (s Spec) Validate() error {
 	switch {
 	case strings.TrimSpace(s.FramePath) == "":
@@ -48,8 +57,31 @@ func (s Spec) Validate() error {
 			return fmt.Errorf("continuation: FrameField %q must be a dotted path of identifiers", s.FrameField)
 		}
 	}
+	if s.WriteOp != "" && !isIdentifierText(s.WriteOp) {
+		return fmt.Errorf("continuation: WriteOp %q must be an identifier", s.WriteOp)
+	}
+	switch s.WriteArgs {
+	case "", "field", "string":
+	default:
+		return fmt.Errorf("continuation: WriteArgs must be \"field\" or \"string\", got %q", s.WriteArgs)
+	}
 
 	return nil
+}
+
+// writeOp returns the effect op frame writes use.
+func (s Spec) writeOp() string {
+	if s.WriteOp == "" {
+		return "ensure"
+	}
+
+	return s.WriteOp
+}
+
+// writeArgsIsString reports whether the write's args is the frame's JSON
+// directly rather than the {path, field, value} object.
+func (s Spec) writeArgsIsString() bool {
+	return s.WriteArgs == "string"
 }
 
 func isIdentifierText(s string) bool {

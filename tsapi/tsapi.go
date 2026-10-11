@@ -74,14 +74,24 @@ type Options struct {
 
 // ContinuationOptions places the frame. Which durable tier backs the object
 // at FramePath is the caller's business; the emitted code talks to it through
-// the consumer's plain effects.
+// the consumer's plain effects - and the write's spelling is the caller's
+// vocabulary, since the compiler does not know what any op means to any
+// consumer.
 type ContinuationOptions struct {
 	// FramePath is the durable object path the frame lives at, e.g.
 	// "/apis/apps/v1/namespaces/default/deployments/cont-marker".
 	FramePath string
 	// FrameField is the dotted field inside the object body holding the
-	// frame JSON, e.g. "data.frame".
+	// frame JSON, e.g. "data.frame" or "status.carry".
 	FrameField string
+	// WriteOp names the effect op checkpoints write with. Empty means
+	// "ensure". E.g. "carry" when the frame rides the program's own
+	// ungated status write.
+	WriteOp string
+	// WriteArgs selects the write's args shape: "field" (default) emits
+	// {path, field, value} with value the frame's JSON; "string" emits the
+	// frame's JSON as args directly (the carry spelling).
+	WriteArgs string
 }
 
 // ScriptTarget mirrors the compiler's target enum, so callers do not name
@@ -289,7 +299,12 @@ func (p *Project) EmitJS(ctx context.Context, entry string) (EmitResult, error) 
 		},
 	}
 	if p.cont != nil {
-		spec := continuationtransforms.Spec{FramePath: p.cont.FramePath, FrameField: p.cont.FrameField}
+		spec := continuationtransforms.Spec{
+			FramePath:  p.cont.FramePath,
+			FrameField: p.cont.FrameField,
+			WriteOp:    p.cont.WriteOp,
+			WriteArgs:  p.cont.WriteArgs,
+		}
 		if err := spec.Validate(); err != nil {
 			return EmitResult{}, fmt.Errorf("tsapi: %w", err)
 		}

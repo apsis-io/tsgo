@@ -512,18 +512,27 @@ func (tx *transformer) fieldGuard(doc string) *ast.Node {
 // Unknown and 'done' program counters fall into default and start over - a
 // terminate tombstone makes the next run a start-over run, which is the
 // lifecycle's contract.
+//
+// Every clause body is a BLOCK: the clauses share one switch-body scope, and
+// segments legitimately duplicate statements (a park inside an if leaves the
+// post-if code on BOTH the fall-through path and the resumed path), so an
+// unbraced `const` in one segment redeclares in its twin and the module
+// fails to load.
 func (tx *transformer) dispatch() *ast.Node {
 	f := tx.Factory()
+	clause := func(kind ast.Kind, label *ast.Node, stmts []*ast.Node) *ast.Node {
+		body := f.NewBlock(f.NewNodeList(stmts), true)
+
+		return f.NewCaseOrDefaultClause(kind, label, f.NewNodeList([]*ast.Node{body}))
+	}
 	clauses := make([]*ast.Node, 0, len(tx.plan.Parks)+1)
-	clauses = append(clauses,
-		f.NewCaseOrDefaultClause(ast.KindDefaultClause, nil, f.NewNodeList(tx.entry)))
+	clauses = append(clauses, clause(ast.KindDefaultClause, nil, tx.entry))
 	for _, p := range tx.plan.Parks {
 		chain, ok := tx.parkChain[p.Ret]
 		if !ok {
 			continue // a park behind a terminate cut is unreachable dead code
 		}
-		clauses = append(clauses,
-			f.NewCaseOrDefaultClause(ast.KindCaseClause, tx.str(p.Label), f.NewNodeList(tx.emitChain(chain))))
+		clauses = append(clauses, clause(ast.KindCaseClause, tx.str(p.Label), tx.emitChain(chain)))
 	}
 
 	return f.NewSwitchStatement(f.NewIdentifier(tx.names["pc"]), f.NewCaseBlock(f.NewNodeList(clauses)))
@@ -543,11 +552,13 @@ func (tx *transformer) getEffect() *ast.Node {
 	return effect
 }
 
-// frameWrite emits the checkpoint: an ensure effect carrying
+// frameWrite emits the checkpoint: a write effect carrying
 // JSON.stringify({ pc: label, ...hoisted }). The caller appends the original
 // return right after. Every write carries the same frame shape - pc plus the
 // JSON-safe locals - so the consumer's { pc, ...locals } convention holds at
-// parks and at the tombstone alike.
+// parks and at the tombstone alike. The spelling is the caller's: WriteOp
+// names the op (default "ensure"), and WriteArgs picks {path, field, value}
+// (default) or the frame JSON as args directly.
 func (tx *transformer) frameWrite(label string) *ast.Node {
 	f := tx.Factory()
 	props := make([]*ast.Node, 0, len(tx.plan.Hoisted)+1)
@@ -559,13 +570,19 @@ func (tx *transformer) frameWrite(label string) *ast.Node {
 
 	stringify := f.NewCallExpression(tx.prop(f.NewIdentifier("JSON"), "stringify"), nil, nil,
 		f.NewNodeList([]*ast.Node{frameObj}), ast.NodeFlagsNone)
-	args := f.NewObjectLiteralExpression(f.NewNodeList([]*ast.Node{
-		tx.propAssign("path", tx.str(tx.spec.FramePath)),
-		tx.propAssign("field", tx.str(tx.spec.FrameField)),
-		tx.propAssign("value", stringify),
-	}), false)
+
+	var args *ast.Node
+	if tx.spec.writeArgsIsString() {
+		args = stringify
+	} else {
+		args = f.NewObjectLiteralExpression(f.NewNodeList([]*ast.Node{
+			tx.propAssign("path", tx.str(tx.spec.FramePath)),
+			tx.propAssign("field", tx.str(tx.spec.FrameField)),
+			tx.propAssign("value", stringify),
+		}), false)
+	}
 	effect := f.NewObjectLiteralExpression(f.NewNodeList([]*ast.Node{
-		tx.propAssign("op", tx.str("ensure")),
+		tx.propAssign("op", tx.str(tx.spec.writeOp())),
 		tx.propAssign("args", args),
 	}), false)
 
