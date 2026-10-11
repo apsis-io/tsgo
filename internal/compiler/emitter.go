@@ -41,6 +41,7 @@ type emitter struct {
 	forceEmit          bool
 	writeFile          WriteFile
 	tr                 *tracing.Tracing
+	transformersBefore []transformers.TransformerFactory
 }
 
 func (e *emitter) emit() {
@@ -69,7 +70,7 @@ func (e *emitter) runScriptTransformers(emitContext *printer.EmitContext, source
 	if e.tr != nil {
 		defer e.tr.Push(tracing.PhaseEmit, "transformNodes", map[string]any{"path": string(sourceFile.PathKey())}, false)()
 	}
-	for _, transformer := range getScriptTransformers(emitContext, e.host, sourceFile) {
+	for _, transformer := range getScriptTransformers(emitContext, e.host, sourceFile, e.transformersBefore) {
 		sourceFile = transformer.TransformSourceFile(sourceFile)
 	}
 	return sourceFile
@@ -109,7 +110,7 @@ func getModuleTransformer(opts *transformers.TransformOptions) *transformers.Tra
 	}
 }
 
-func getScriptTransformers(emitContext *printer.EmitContext, host printer.EmitHost, sourceFile *ast.SourceFile) []*transformers.Transformer {
+func getScriptTransformers(emitContext *printer.EmitContext, host printer.EmitHost, sourceFile *ast.SourceFile, before []transformers.TransformerFactory) []*transformers.Transformer {
 	var tx []*transformers.Transformer
 	options := host.Options()
 
@@ -132,6 +133,13 @@ func getScriptTransformers(emitContext *printer.EmitContext, host printer.EmitHo
 		Resolver:                  referenceResolver,
 		EmitResolver:              emitResolver,
 		GetEmitModuleFormatOfFile: host.GetEmitModuleFormatOfFile,
+	}
+
+	// caller-provided transformers run first, on the parsed (pre-erasure) AST
+	for _, factory := range before {
+		if result := factory(&opts); result != nil {
+			tx = append(tx, result)
+		}
 	}
 
 	// transform TypeScript syntax

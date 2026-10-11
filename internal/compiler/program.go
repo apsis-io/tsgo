@@ -30,6 +30,7 @@ import (
 	"github.com/apsis-io/tsgo/internal/spanmap"
 	"github.com/apsis-io/tsgo/internal/symlinks"
 	"github.com/apsis-io/tsgo/internal/tracing"
+	"github.com/apsis-io/tsgo/internal/transformers"
 	"github.com/apsis-io/tsgo/internal/tsoptions"
 	"github.com/apsis-io/tsgo/internal/tspath"
 )
@@ -1872,6 +1873,10 @@ type EmitOptions struct {
 	EmitOnly          EmitOnly
 	ForceEmit         bool
 	WriteFile         WriteFile
+	// ScriptTransformersBefore, when set, runs before the built-in script
+	// transformers, on the parsed (pre-type-erasure) AST. Each factory is
+	// constructed once per emitted file with the file's emit context.
+	ScriptTransformersBefore []transformers.TransformerFactory
 }
 
 type EmitResult struct {
@@ -1918,12 +1923,13 @@ func (p *Program) Emit(ctx context.Context, options EmitOptions) *EmitResult {
 
 	for _, sourceFile := range sourceFiles {
 		emitter := &emitter{
-			writer:     nil,
-			sourceFile: sourceFile,
-			emitOnly:   options.EmitOnly,
-			forceEmit:  options.ForceEmit,
-			writeFile:  options.WriteFile,
-			tr:         p.hosts.Tracing,
+			writer:             nil,
+			sourceFile:         sourceFile,
+			emitOnly:           options.EmitOnly,
+			forceEmit:          options.ForceEmit,
+			writeFile:          options.WriteFile,
+			tr:                 p.hosts.Tracing,
+			transformersBefore: options.ScriptTransformersBefore,
 		}
 		emitters = append(emitters, emitter)
 		wg.Queue(func() {

@@ -29,6 +29,7 @@ import (
 	"github.com/apsis-io/tsgo/internal/core"
 	"github.com/apsis-io/tsgo/internal/locale"
 	"github.com/apsis-io/tsgo/internal/scanner"
+	"github.com/apsis-io/tsgo/internal/transformers/continuationtransforms"
 	"github.com/apsis-io/tsgo/internal/tsoptions"
 	"github.com/apsis-io/tsgo/internal/tspath"
 	"github.com/apsis-io/tsgo/internal/vfs/vfstest"
@@ -38,6 +39,7 @@ import (
 // NewProject; every method on it is safe to call repeatedly.
 type Project struct {
 	prog *compiler.Program
+	cont *ContinuationOptions
 }
 
 // Options configures NewProject.
@@ -59,6 +61,27 @@ type Options struct {
 	BaseDir string
 	// Target selects the emit target. Zero means ES2022.
 	Target ScriptTarget
+	// Continuation, when set, enables the park-boundary continuation
+	// transform. Generator functions whose returns read as the outcome
+	// protocol (a literal `o` property: 'quiesce' parks, 'terminate' clears
+	// the frame) are rewritten into resumable state machines that checkpoint
+	// their frame - program counter plus JSON-safe locals - into the caller's
+	// durable storage through plain read/write effects. Off by default; an
+	// automatic rewrite of every generator would be a language change, this
+	// is an enhancement. Generators without parks pass through untouched.
+	Continuation *ContinuationOptions
+}
+
+// ContinuationOptions places the frame. Which durable tier backs the object
+// at FramePath is the caller's business; the emitted code talks to it through
+// the consumer's plain effects.
+type ContinuationOptions struct {
+	// FramePath is the durable object path the frame lives at, e.g.
+	// "/apis/apps/v1/namespaces/default/deployments/cont-marker".
+	FramePath string
+	// FrameField is the dotted field inside the object body holding the
+	// frame JSON, e.g. "data.frame".
+	FrameField string
 }
 
 // ScriptTarget mirrors the compiler's target enum, so callers do not name
@@ -162,10 +185,13 @@ func NewProject(files map[string]string, entries []string, opts Options) (*Proje
 	config := tsoptions.NewParsedCommandLine(&copts, names, nil,
 		tspath.RootedDirectoryPathFromNormalized(tspath.GetDirectoryPath(entries[0])), fs.CaseSensitivity())
 
-	return &Project{prog: compiler.NewProgram(compiler.ProgramOptions{
-		Config: config,
-		Host:   host,
-	})}, nil
+	return &Project{
+		prog: compiler.NewProgram(compiler.ProgramOptions{
+			Config: config,
+			Host:   host,
+		}),
+		cont: opts.Continuation,
+	}, nil
 }
 
 func tri(b bool) core.Tristate {
@@ -230,15 +256,25 @@ type EmitResult struct {
 	Diagnostics []Diagnostic
 }
 
+// continuationRefusalCode marks the continuation transform's fail-closed
+// diagnostics. Upstream's code ranges end below this; the fork owns 990xx.
+const continuationRefusalCode = 99001
+
 // EmitJS emits ONLY the JavaScript for one entry file, captured from the
 // emitter's write callback - nothing touches the filesystem.
+//
+// With Continuation set, the entry's generators are planned first; a refusal
+// fails closed - the diagnostics name the construct and its position, and no
+// JavaScript is produced, because a transform that miscompiles a checkpoint
+// writes a frame that restores into a lie.
 func (p *Project) EmitJS(ctx context.Context, entry string) (EmitResult, error) {
 	sf := p.prog.GetSourceFile(tspath.RootedFilePathFromNormalized(entry))
 	if sf == nil {
 		return EmitResult{}, fmt.Errorf("tsapi: %q is not part of the program", entry)
 	}
+
 	var js string
-	res := p.prog.Emit(ctx, compiler.EmitOptions{
+	emitOptions := compiler.EmitOptions{
 		TargetSourceFiles: []*ast.SourceFile{sf},
 		EmitOnly:          compiler.EmitOnlyJs,
 		WriteFile: func(fileName tspath.RootedFilePath, text string, data *compiler.WriteFileData) error {
@@ -251,12 +287,45 @@ func (p *Project) EmitJS(ctx context.Context, entry string) (EmitResult, error) 
 
 			return nil
 		},
-	})
+	}
+	if p.cont != nil {
+		spec := continuationtransforms.Spec{FramePath: p.cont.FramePath, FrameField: p.cont.FrameField}
+		if err := spec.Validate(); err != nil {
+			return EmitResult{}, fmt.Errorf("tsapi: %w", err)
+		}
+		c := p.Checker(ctx)
+		defer c.Close()
+		plans, refusals := continuationtransforms.PlanFile(sf, c.c, spec)
+		if len(refusals) > 0 {
+			return EmitResult{Diagnostics: refusalDiagnostics(sf, refusals)}, nil
+		}
+		if len(plans) > 0 {
+			emitOptions.ScriptTransformersBefore = append(emitOptions.ScriptTransformersBefore,
+				continuationtransforms.NewFactory(plans, spec))
+		}
+	}
+	res := p.prog.Emit(ctx, emitOptions)
 
 	return EmitResult{
 		JS:          js,
 		Diagnostics: format(res.Diagnostics),
 	}, nil
+}
+
+func refusalDiagnostics(f *ast.SourceFile, refusals []continuationtransforms.Refusal) []Diagnostic {
+	out := make([]Diagnostic, 0, len(refusals))
+	for _, r := range refusals {
+		line, char := lineChar(f, r.Node.Pos())
+		out = append(out, Diagnostic{
+			File:    string(f.FileName()),
+			Line:    line,
+			Char:    char,
+			Code:    continuationRefusalCode,
+			Message: "continuation: " + r.Message,
+		})
+	}
+
+	return out
 }
 
 // ─── checker navigation ─────────────────────────────────────────────────────
