@@ -9,12 +9,12 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/microsoft/TypeScript/tsc/internal/core"
-	"github.com/microsoft/TypeScript/tsc/internal/nativepath"
-	"github.com/microsoft/TypeScript/tsc/internal/osutil"
-	"github.com/microsoft/TypeScript/tsc/internal/tspath"
-	"github.com/microsoft/TypeScript/tsc/internal/vfs"
-	"github.com/microsoft/TypeScript/tsc/internal/vfs/internal"
+	"github.com/apsis-io/tsgo/internal/core"
+	"github.com/apsis-io/tsgo/internal/nativepath"
+	"github.com/apsis-io/tsgo/internal/osutil"
+	"github.com/apsis-io/tsgo/internal/tspath"
+	"github.com/apsis-io/tsgo/internal/vfs"
+	"github.com/apsis-io/tsgo/internal/vfs/internal"
 )
 
 var (
