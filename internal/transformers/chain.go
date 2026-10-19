@@ -5,6 +5,7 @@ import (
 	"github.com/apsis-io/tsgo/internal/binder"
 	"github.com/apsis-io/tsgo/internal/core"
 	"github.com/apsis-io/tsgo/internal/printer"
+	"github.com/apsis-io/tsgo/internal/tspath"
 )
 
 type chainedTransformer struct {
@@ -24,11 +25,13 @@ func (ch *chainedTransformer) visit(node *ast.Node) *ast.Node {
 }
 
 type TransformOptions struct {
-	Context                   *printer.EmitContext
-	CompilerOptions           *core.CompilerOptions
-	Resolver                  binder.ReferenceResolver
-	EmitResolver              printer.EmitResolver
-	GetEmitModuleFormatOfFile func(file ast.HasFileName) core.ModuleKind
+	Context                        *printer.EmitContext
+	CompilerOptions                *core.CompilerOptions
+	Resolver                       binder.ReferenceResolver
+	EmitResolver                   printer.EmitResolver
+	GetEmitModuleFormatOfFile      func(file ast.HasFileName) core.ModuleKind
+	ContentMapperExtensionRewrites []tspath.ExtensionRewrite
+	CaseSensitivity                tspath.CaseSensitivity
 }
 
 type TransformerFactory = func(opt *TransformOptions) *Transformer

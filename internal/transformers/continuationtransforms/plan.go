@@ -848,7 +848,7 @@ func jsonSafe(c *checker.Checker, t *checker.Type, loc *ast.Node) bool {
 			return false
 		}
 		for _, prop := range c.GetPropertiesOfType(t) {
-			if prop.Flags&(ast.SymbolFlagsFunction|ast.SymbolFlagsMethod|ast.SymbolFlagsGetAccessor|ast.SymbolFlagsSetAccessor) != 0 {
+			if prop.Flags()&(ast.SymbolFlagsFunction|ast.SymbolFlagsMethod|ast.SymbolFlagsGetAccessor|ast.SymbolFlagsSetAccessor) != 0 {
 				return false
 			}
 			if !jsonSafe(c, c.GetTypeOfSymbolAtLocation(prop, loc), loc) {
@@ -867,7 +867,7 @@ func jsonSafe(c *checker.Checker, t *checker.Type, loc *ast.Node) bool {
 	case of&checker.ObjectFlagsReference != 0:
 		// arrays only: the reference target must be the global Array (one
 		// type argument), and the element type must round-trip
-		if sym := t.Symbol(); sym != nil && sym.Name == "Array" {
+		if sym := t.Symbol(); sym != nil && sym.Name() == "Array" {
 			args := c.GetTypeArguments(t)
 			if len(args) == 1 && jsonSafe(c, args[0], loc) {
 				return true

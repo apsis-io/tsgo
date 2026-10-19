@@ -5,8 +5,8 @@ This repository is a TRIMMED distribution of the TypeScript compiler in Go
 upstream's packages all live under `internal/`, invisible to every other
 module, so no one could import the compiler as a library.
 
-- **Upstream pin**: `microsoft/TypeScript` @ `a1ef42b9`
-  ("Fix flaky diagnostic on JS constructor-defined properties (#64646)").
+- **Upstream pin**: `microsoft/TypeScript` @ `5237fd468`
+  ("Cache undefined widening properties per symbol, not per name (#64728)").
 - **The bridge**: `tsapi/` — the ONE importable surface (in-memory project
   against the bundled libs, diagnostics, JS-only emit captured in memory,
   checker primitives for reading types off the AST). Generic by design; no
