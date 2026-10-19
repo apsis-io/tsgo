@@ -31,7 +31,7 @@ module, so no one could import the compiler as a library.
 
 To re-pin: take the new upstream sha into the full clone, rebase/refresh
 `apsis/main`, re-run the trim (the reachable set is `go list -deps
-./tsapi`), re-apply this file's steps, tag `apsis/vX.Y.Z`.
+./tsapi`), re-apply this file's steps, tag `vX.Y.Z`.
 
 ## Known upstream issues found through this bridge (2026-10-06)
 
