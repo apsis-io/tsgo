@@ -192,3 +192,51 @@ func TestEmitJS(t *testing.T) {
 		t.Errorf("emitted JS does not carry the '@perseid/sdk' specifier:\n%s", res.JS)
 	}
 }
+
+// The derive's typecheck gate once reported ZERO diagnostics for a
+// defineStep-wrapped non-generator body with an unimported identifier, and
+// the wrong diagnosis (a constraint-fallback wit-marker complaint) cost a
+// ghost-hunt downstream. Never reproduced at HEAD - these fixtures pin the
+// integrity so it stays: whatever the body shape, an unimported name must
+// reach the gate as TS2304.
+func TestDeriveGateDiagnosticIntegrity(t *testing.T) {
+	// the real sdk signature: generic over the effect union with a
+	// constraint - the non-generator arrow's inference fails and the type
+	// argument falls back to the constraint, which must not swallow the
+	// checker's diagnostics
+	const sdk = `export type Resume = { after: number }
+export type Outcome =
+  | { readonly o: 'yield'; readonly carry?: string }
+  | { readonly o: 'quiesce'; readonly resume: Resume; readonly carry?: string }
+  | { readonly o: 'terminate'; readonly carry?: string }
+export type AnyEffect = { readonly op: string; readonly args: unknown }
+export type Step<E extends AnyEffect, A = Outcome> = Generator<E, A, any>
+export declare function defineStep<E extends AnyEffect>(body: () => Step<E, Outcome>): () => Step<E, Outcome>
+`
+	for name, step := range map[string]string{
+		// non-generator body: the reported suppressor shape
+		"arrow body":        "export const step = defineStep(() => `x is ${bogusGlobal.missing.member}`)\n",
+		"generator body":    "export const step = defineStep(function* () { yield bogusGlobal.missing.member })\n",
+		"unwrapped	builder": "export const step = (() => `x is ${bogusGlobal.missing.member}`)()\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := NewProject(map[string]string{
+				"/src/step.ts": "import { defineStep } from '@apsis-io/perseid'\n\n" + step,
+				"/node_modules/@apsis-io/perseid/index.ts": sdk,
+			}, []string{"/src/step.ts"}, Options{Strict: true, SkipLibCheck: true, Libs: []string{"lib.es2022.d.ts", "lib.dom.d.ts"}})
+			if err != nil {
+				t.Fatalf("NewProject: %v", err)
+			}
+			ds := p.Diagnostics(context.Background())
+			found := false
+			for _, d := range ds {
+				if d.Code == 2304 {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("TS2304 lost for the unimported identifier; the gate saw:\n%s", FormatDiagnostics(ds))
+			}
+		})
+	}
+}
