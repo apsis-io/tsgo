@@ -240,3 +240,53 @@ export declare function defineStep<E extends AnyEffect>(body: () => Step<E, Outc
 		})
 	}
 }
+
+// The silent degrade, mapped: a defineStep-wrapped body that is NOT a
+// generator can typecheck CLEANLY while its effect union degrades to the
+// constraint (the never-returning body is legal TS - the checker cannot and
+// must not refuse it). The honest detection is generator-ness of the wrapped
+// body, which the type system cannot see - hence the surface: CallArguments
+// reaches the wrapped body, IsGeneratorFunction reads the asterisk.
+func TestDeriveGateDegradeShapes(t *testing.T) {
+	const sdk = `export type Resume = { after: number }
+export type Outcome =
+  | { readonly o: 'yield'; readonly carry?: string }
+  | { readonly o: 'quiesce'; readonly resume: Resume; readonly carry?: string }
+  | { readonly o: 'terminate'; readonly carry?: string }
+export type AnyEffect = { readonly op: string; readonly args: unknown }
+export type Step<E extends AnyEffect, A = Outcome> = Generator<E, A, any>
+export declare function defineStep<E extends AnyEffect>(body: () => Step<E, Outcome>): () => Step<E, Outcome>
+`
+	for name, step := range map[string]string{
+		"healthy generator":     "export const step = defineStep(function* () { yield { op: 'get', args: '/x' } })\n",
+		"never-returning body":  "export const step = defineStep(() => { throw new Error('unreachable') })\n",
+		"string body":           "export const step = defineStep(() => `x is ${bogusGlobal.missing.member}`)\n",
+		"explicit step factory": "declare const s: Step<AnyEffect, Outcome>\nexport const step = defineStep(() => s)\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := NewProject(map[string]string{
+				"/src/step.ts": "import { defineStep, Step, AnyEffect, Outcome } from '@apsis-io/perseid'\n\n" + step,
+				"/node_modules/@apsis-io/perseid/index.ts": sdk,
+			}, []string{"/src/step.ts"}, Options{Strict: true, SkipLibCheck: true, Libs: []string{"lib.es2022.d.ts", "lib.dom.d.ts"}})
+			if err != nil {
+				t.Fatalf("NewProject: %v", err)
+			}
+			sf := p.SourceFile("/src/step.ts")
+			node, ok := sf.ExportByName("step")
+			if !ok {
+				t.Fatal("no step export")
+			}
+			init := node.Initializer()
+			if init == nil {
+				t.Fatal("the step export has no initializer")
+			}
+			args := init.CallArguments()
+			if len(args) != 1 {
+				t.Fatalf("expected the defineStep call's single argument, got %d", len(args))
+			}
+			if got := args[0].IsGeneratorFunction(); got != (name == "healthy generator") {
+				t.Errorf("IsGeneratorFunction = %v for %q", got, name)
+			}
+		})
+	}
+}

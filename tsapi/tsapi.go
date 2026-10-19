@@ -445,6 +445,51 @@ func (c *Checker) TypeOf(n *Node) *Type {
 	return &Type{t: c.c.GetTypeAtLocation(n.n)}
 }
 
+// Initializer returns the node's initializer when the node is a binding (a
+// variable declaration and friends), nil otherwise.
+func (n *Node) Initializer() *Node {
+	if init := n.n.Initializer(); init != nil {
+		return &Node{n: init}
+	}
+
+	return nil
+}
+
+// CallArguments returns the argument nodes when the node is a call
+// expression, nil otherwise.
+func (n *Node) CallArguments() []*Node {
+	if !ast.IsCallExpression(n.n) {
+		return nil
+	}
+	args := n.n.AsCallExpression().Arguments.Nodes
+	out := make([]*Node, 0, len(args))
+	for _, a := range args {
+		out = append(out, &Node{n: a})
+	}
+
+	return out
+}
+
+// IsGeneratorFunction reports whether the node is a generator function-like
+// - a factory that produces a fresh generator per call. The type system
+// cannot see the asterisk (a function returning a generator and a generator
+// function share one type), so this is the only honest way to ask.
+func (n *Node) IsGeneratorFunction() bool {
+	if !ast.IsFunctionLike(n.n) {
+		return false
+	}
+	switch n.n.Kind {
+	case ast.KindFunctionDeclaration:
+		return n.n.AsFunctionDeclaration().AsteriskToken != nil
+	case ast.KindFunctionExpression:
+		return n.n.AsFunctionExpression().AsteriskToken != nil
+	case ast.KindMethodDeclaration:
+		return n.n.AsMethodDeclaration().AsteriskToken != nil
+	}
+
+	return false
+}
+
 // CallSignatures returns the call signatures of a type.
 func (c *Checker) CallSignatures(t *Type) []*Signature {
 	sigs := c.c.GetCallSignatures(t.t)
